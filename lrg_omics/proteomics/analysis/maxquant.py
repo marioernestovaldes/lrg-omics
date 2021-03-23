@@ -29,12 +29,12 @@ def get_maxquant_txt(path, txt='proteinGroups.txt', mq_run_name=None,
     df.columns = [i.replace(pipename, '').strip() for i in df.columns]
     return df
 
-def melt_protein_quant(df, id_vars=None, var_name='TMT'):
-    if id_vars is None:
-        id_vars=['MaxQuantRun', 'PipeName' ,'Protein IDs', 'Score']
+
+def melt_protein_quant(df, id_vars=['Protein IDs'], var_name='TMT'):
     output = df.melt(id_vars=id_vars, var_name=var_name, value_name='ReporterIntensity')
     output['TMT'] = output['TMT'].str.replace('Reporter intensity corrected ', '').astype(int)
     return output
+
 
 def get_protein_quant(path, melt=False, normed=None, take_log=False,
                       divide_by_column_mean=False, mean_centering_per_plex=False,
@@ -135,10 +135,35 @@ def protein_quant_from_paths(paths, pipename, protein_col='Protein IDs',
     return protein_quant
 
 
+def extract_protein_quant(df, melt=False, normed=None, take_log=False, 
+    remove_contaminants=True, remove_patterns=('REV_', 'CON_'),
+    divide_by_column_mean=False, mean_centering_per_plex=False,
+    drop_zero_q=False, protein_col='Protein IDs', groupby=None):
 
-def extract_protein_quant(df, melt=False, normed=None, take_log=False,
-                          divide_by_column_mean=False, mean_centering_per_plex=False,
-                          drop_zero_q=False, protein_col='Protein IDs'):
+    if groupby is None:
+        data = _extract_protein_quant(df, divide_by_column_mean=divide_by_column_mean, 
+                                      mean_centering_per_plex=mean_centering_per_plex, 
+                                      protein_col=protein_col, melt=melt, normed=normed)
+        return data
+    else:
+        grps = df.groupby('RawFile')
+        quant_data = []
+        for ndx, grp in grps:
+            data = _extract_protein_quant(grp, divide_by_column_mean=divide_by_column_mean, 
+                                          mean_centering_per_plex=mean_centering_per_plex, 
+                                          protein_col=protein_col, melt=melt, normed=normed)
+            data.index = [ndx]*len(data)
+            data.index.name = 'RawFile'
+            quant_data.append(data.reset_index())
+        return pd.concat(quant_data)
+
+
+def _extract_protein_quant(df, melt=False, normed=None, take_log=False, 
+                           remove_contaminants=True, 
+                           remove_patterns=('REV_', 'CON_'),
+                           divide_by_column_mean=False, 
+                           mean_centering_per_plex=False,
+                           drop_zero_q=False, protein_col='Protein IDs'):
     '''
     Gets the proteinGroups file based on the .RAW name 
     and the pipename. Records starting with REV or CON 
@@ -160,8 +185,14 @@ def extract_protein_quant(df, melt=False, normed=None, take_log=False,
     '''
     if len(df) == 0:
         return None
-    df = df[~( df['Protein IDs'].str.startswith('REV_') | 
-               df['Protein IDs'].str.startswith('CON_') )]
+
+    if remove_contaminants: df = df[ df['Potential contaminant'].isna() ]
+    if remove_patterns is not None:
+        for pattern in remove_patterns:
+            df = df[ ~df['Majority protein IDs'].str.contains(pattern)]
+
+    protein_vc = df[protein_col].value_counts()
+    assert protein_vc.max() == 1, f'Duplicated protein labels found: {protein_vc[protein_vc>1]}'
 
     if drop_zero_q:
         df = df[df['Q-value'] != 0]
@@ -173,7 +204,8 @@ def extract_protein_quant(df, melt=False, normed=None, take_log=False,
     # the first element and allow 30 letters at max.
     # data[protein_col] = data[protein_col].apply(lambda x: x.split('|')[:2][-1][:30])
     # Just the reporter intensities
-    reporter_intensity = df.iloc[:,list(range(22, 33))]
+    reporter_intensity = df.filter(regex='Reporter intensity corrected')
+
     # Replace 0 with NaN
     reporter_intensity = reporter_intensity.replace(0, np.NaN)
     assert normed in [None, 'fold_change', 'diff_to_ref']
@@ -199,5 +231,11 @@ def extract_protein_quant(df, melt=False, normed=None, take_log=False,
     # Combine data with reporter int    
     output = pd.concat([data, reporter_intensity], axis=1)
     if melt:
-        output = melt_protein_quant(output)      
-    return output    
+        output = melt_protein_quant(output, id_vars=protein_col)      
+    return output
+
+
+def melt_protein_quant(df, id_vars='Protein IDs', var_name='TMT'):
+    output = df.melt(id_vars=id_vars, var_name=var_name, value_name='ReporterIntensity')
+    output['TMT'] = output['TMT'].str.replace('Reporter intensity corrected ', '').astype(int)
+    return output
